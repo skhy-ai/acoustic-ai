@@ -1,0 +1,16 @@
+project_id = "naovefbmlxpoeyymtpfp"
+
+[functions.m1-data-acquisition]
+verify_jwt = false
+
+[functions.m2-preprocessing]
+verify_jwt = false
+
+[functions.m3-augmentation]
+verify_jwt = false
+
+[functions.m4-ml-processing]
+verify_jwt = false
+
+[functions.m5-application]
+verify_jwt = false

@@ -8,26 +8,35 @@ import librosa.display
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
+from pytube import Playlist
+import pickle
+import joblib
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score
+import webbrowser
 
 # File dialogs
 from tkinter.filedialog import askopenfilename, askdirectory
 
-# Import actual modules (update with your real module paths)
+# Import your actual modules (update with your real module paths)
 from acquisitions.dataset_download.unified import download_soundata_dataset
 from acquisitions.youtube.playlist import save_playlist_urls
 from acquisitions.youtube.download import download_audio
-from processing.feature_extraction import extract_features
+from processing.dataset_preparation.feature_extraction import extract_features
 from processing.augmentation.adjust_pitch import process_all_files as process_pitch
 from processing.augmentation.adjust_volume import process_all_files as process_volume
 from processing.augmentation.reverse_audio import process_all_files as process_reverse
 from processing.segmentation.generate_chunks import process_all_files as generate_audio_chunks
-from processing.cleanup import validate_audio_samples
-from processing.sliding_window import sliding_window
-from processing.source_separation import separate_sources
-from processing.data_preparation.metadata_based_class_creation import copy_files_to_class_directories, find_audio_files
-from processing.data_preparation.organize_sound_samples import organize_samples
-from processing.data_preparation.rename_class import copy_files_to_directory
-from reports.generate_reports import generate_sampled_data_report, generate_dataset_report
+from cleanup.cleanup_invalid_files import clean_up_invalid_files as validate_audio_samples
+from processing.segmentation.sliding_window import sliding_window
+from processing.segmentation.source_separation import separate_sources
+from processing.dataset_preparation.metadata_based_class_creation import copy_files_to_class_directories, find_audio_files
+from processing.dataset_preparation.organize_sound_samples import organize_samples
+from processing.dataset_preparation.rename_class import copy_files_to_directory
+#from reports.generate_reports import generate_sampled_data_report, generate_dataset_report
 
 # --- Directory Setup ---
 BASE_DIR = os.path.abspath("sound_classifier_system")
@@ -40,23 +49,115 @@ SOUND_PROCESSED_DIR = os.path.join(BASE_DIR, "sound_data", "processed")
 SAMPLED_DATA_DIR = os.path.join(BASE_DIR, "sampled_data")
 SOUND_DATASET_DIR = os.path.join(BASE_DIR, "sound_dataset")
 
-# Ensure directories exist
 for d in [BASE_DIR, SOUND_CHUNKED_DIR, SOUND_FILTERED_DIR, SOUND_PITCH_DIR, SOUND_VOLUME_DIR,
           SOUND_REVERSED_DIR, SOUND_PROCESSED_DIR, SAMPLED_DATA_DIR, SOUND_DATASET_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# --- Functional Implementations ---
+# --- Tooltip Class for Button Explanations ---
+class CreateToolTip:
+    """
+    Create a tooltip for a given widget.
+    """
+    def __init__(self, widget, text='widget info'):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+
+    def enter(self, event=None):
+        self.showtip()
+
+    def leave(self, event=None):
+        self.hidetip()
+
+    def showtip(self):
+        if self.tipwindow or not self.text:
+            return
+        x, y, _, cy = self.widget.bbox("insert")
+        x = x + self.widget.winfo_rootx() + 20
+        y = y + cy + self.widget.winfo_rooty() + 20
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry("+%d+%d" % (x, y))
+        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
+                         background="#ffffe0", relief=tk.SOLID, borderwidth=1,
+                         font=("tahoma", "8", "normal"))
+        label.pack(ipadx=1)
+
+    def hidetip(self):
+        tw = self.tipwindow
+        self.tipwindow = None
+        if tw:
+            tw.destroy()
+
+# --- Helper for Logging and Error Handling ---
+def log_message(message, error=False):
+    """Insert a log message in the log panel."""
+    tag = "ERROR" if error else "INFO"
+    log_entry = f"[{tag}] {message}\n"
+    log_text.config(state="normal")
+    log_text.insert("end", log_entry)
+    log_text.see("end")
+    log_text.config(state="disabled")
+
+def safe_run(func):
+    """Wrap a callback so that errors are caught, logged, and shown to the user."""
+    def wrapper(*args, **kwargs):
+        try:
+            func(*args, **kwargs)
+        except Exception as e:
+            error_msg = f"Error in {func.__name__}: {str(e)}"
+            log_message(error_msg, error=True)
+            messagebox.showerror("Error", error_msg)
+    return wrapper
+
+# --- Functional Implementations (existing functions remain unchanged) ---
 def download_dataset():
-    download_soundata_dataset()
-    messagebox.showinfo("Acquisitions", "Dataset downloaded and stored in acquisitions/dataset_download")
+    dataset_name = simpledialog.askstring("Download Dataset",
+                                            "Enter the dataset name (e.g., urbansound8k, esc50, gtzan):")
+    if not dataset_name:
+        messagebox.showwarning("Input Error", "Dataset name is required.")
+        return
+
+    data_home = filedialog.askdirectory(title="Select Directory to Store Dataset")
+    if not data_home:
+        messagebox.showwarning("Input Error", "You must select a directory to store the dataset.")
+        return
+
+    download_soundata_dataset(dataset_name, data_home)
+    messagebox.showinfo("Acquisitions", f"{dataset_name} dataset downloaded to {data_home}")
 
 def download_youtube_playlist():
-    save_playlist_urls()
-    messagebox.showinfo("Acquisitions", "YouTube playlist URLs saved in acquisitions/youtube")
+    playlist_url = simpledialog.askstring("Download YouTube Playlist", "Enter the YouTube Playlist URL:")
+    if not playlist_url:
+        messagebox.showwarning("Input Error", "Playlist URL is required.")
+        return
+
+    output_file = filedialog.asksaveasfilename(defaultextension=".txt",
+                                               title="Save Playlist URLs",
+                                               filetypes=[("Text Files", "*.txt")])
+    if not output_file:
+        messagebox.showwarning("Input Error", "You must select an output file to save the URLs.")
+        return
+
+    save_playlist_urls(playlist_url, output_file)
 
 def download_youtube_video():
-    download_audio()
-    messagebox.showinfo("Acquisitions", "YouTube video downloaded and saved in acquisitions/youtube")
+    video_url = simpledialog.askstring("Download YouTube Video", "Enter the YouTube Video URL:")
+    if not video_url:
+        messagebox.showwarning("Input Error", "Video URL is required.")
+        return
+
+    output_file = filedialog.asksaveasfilename(defaultextension=".mp3",
+                                               title="Save Video Audio",
+                                               filetypes=[("MP3 Files", "*.mp3"), ("WAV Files", "*.wav")])
+    if not output_file:
+        messagebox.showwarning("Input Error", "You must select an output file to save the audio.")
+        return
+
+    download_audio(video_url, output_file)
+    messagebox.showinfo("Acquisitions", "Video audio downloaded successfully.")
 
 def process_feature_extraction_file():
     file_path = askopenfilename(title="Select Audio File for Feature Extraction", 
@@ -121,7 +222,6 @@ def create_classes_from_metadata():
     if not audio_base_dir:
         messagebox.showwarning("Data Preparation", "No audio base directory selected.")
         return
-    # Ask user for file extension
     file_ext = simpledialog.askstring("Data Preparation", "Enter file extension (.wav or .mp3):", initialvalue=".wav")
     if file_ext not in ['.wav', '.mp3']:
         messagebox.showerror("Data Preparation", "Invalid file extension.")
@@ -142,7 +242,6 @@ def rename_classes():
     if not source_dir:
         messagebox.showwarning("Data Preparation", "No directory selected.")
         return
-    # Ask for file extension to process
     file_ext = simpledialog.askstring("Data Preparation", "Enter file extension (.wav or .mp3):", initialvalue=".wav")
     if file_ext not in ['.wav', '.mp3']:
         messagebox.showerror("Data Preparation", "Invalid file extension.")
@@ -150,7 +249,88 @@ def rename_classes():
     copy_files_to_directory([source_dir], SAMPLED_DATA_DIR, file_ext)
     messagebox.showinfo("Data Preparation", "Classes renamed and structured.")
 
-# --- Manual Filtering GUI ---
+# --- New Functions for Model Building and API Connection ---
+def build_model():
+    feature_folder = filedialog.askdirectory(title="Select Feature Folder")
+    if not feature_folder:
+        messagebox.showwarning("Model Building", "No feature folder selected.")
+        return
+
+    class_files = [f for f in os.listdir(feature_folder) if f.endswith('.pkl')]
+    if not class_files:
+        messagebox.showerror("Model Building", "No feature files (.pkl) found in the selected folder.")
+        return
+
+    classes_message = "Available classes:\n"
+    for idx, file in enumerate(class_files):
+        classes_message += f"{idx + 1}. {os.path.splitext(file)[0]}\n"
+    messagebox.showinfo("Available Classes", classes_message)
+
+    indices_str = simpledialog.askstring("Select Classes", "Enter the numbers of the classes to use (comma separated):")
+    if not indices_str:
+        messagebox.showwarning("Model Building", "No classes selected.")
+        return
+    try:
+        selected_indices = [int(idx.strip()) - 1 for idx in indices_str.split(",")]
+    except Exception as e:
+        messagebox.showerror("Model Building", "Invalid input for class indices.")
+        return
+
+    def load_features(feature_folder, selected_indices):
+        features = []
+        labels = []
+        class_files_local = [f for f in os.listdir(feature_folder) if f.endswith('.pkl')]
+        try:
+            filtered_files = [class_files_local[i] for i in selected_indices]
+        except IndexError:
+            messagebox.showerror("Model Building", "One or more class indices are out of range.")
+            return None, None
+        for file in filtered_files:
+            class_name = os.path.splitext(file)[0]
+            with open(os.path.join(feature_folder, file), 'rb') as f:
+                class_features = pickle.load(f)
+                features.extend(class_features)
+                labels.extend([class_name] * len(class_features))
+        return np.array(features), np.array(labels)
+
+    X, y = load_features(feature_folder, selected_indices)
+    if X is None or y is None:
+        return
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    num_neighbors_str = simpledialog.askstring("KNN Parameter", "Enter the number of neighbors for KNN (default 5):")
+    try:
+        num_neighbors = int(num_neighbors_str) if num_neighbors_str and num_neighbors_str.strip() != "" else 5
+    except:
+        num_neighbors = 5
+
+    svm_clf = SVC(kernel='linear', probability=True)
+    rf_clf = RandomForestClassifier(n_estimators=100, random_state=42)
+    knn_clf = KNeighborsClassifier(n_neighbors=num_neighbors)
+
+    ensemble_clf = VotingClassifier(estimators=[
+        ('svm', svm_clf),
+        ('rf', rf_clf),
+        ('knn', knn_clf)
+    ], voting='soft')
+
+    ensemble_clf.fit(X_train, y_train)
+    y_pred = ensemble_clf.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    msg = f"Ensemble classifier built with accuracy: {acc:.2f}\nModel will be saved as 'ensemble_model.joblib'."
+    joblib.dump(ensemble_clf, "ensemble_model.joblib")
+    messagebox.showinfo("Model Building", msg)
+
+def connect_to_api():
+    api_url = "http://localhost:8000/docs"
+    try:
+        webbrowser.open(api_url)
+        messagebox.showinfo("API Connection", f"Opening API documentation at {api_url}")
+    except Exception as e:
+        messagebox.showerror("API Connection", f"Failed to open API documentation: {e}")
+
+# --- Manual Filtering GUI (unchanged) ---
 class AudioFilterGUI(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
@@ -170,12 +350,15 @@ class AudioFilterGUI(tk.Toplevel):
         self.plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         control_frame = ttk.Frame(self)
         control_frame.pack(side=tk.BOTTOM, pady=10)
-        self.keep_button = ttk.Button(control_frame, text="Keep", command=self.keep_current)
-        self.keep_button.pack(side=tk.LEFT, padx=5)
-        self.delete_button = ttk.Button(control_frame, text="Delete", command=self.delete_current)
-        self.delete_button.pack(side=tk.LEFT, padx=5)
-        self.next_button = ttk.Button(control_frame, text="Next", command=self.next_file)
-        self.next_button.pack(side=tk.LEFT, padx=5)
+        btn_keep = ttk.Button(control_frame, text="Keep", command=safe_run(self.keep_current))
+        btn_keep.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+        CreateToolTip(btn_keep, "Keep the current audio chunk.")
+        btn_delete = ttk.Button(control_frame, text="Delete", command=safe_run(self.delete_current))
+        btn_delete.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        CreateToolTip(btn_delete, "Delete the current audio chunk.")
+        btn_next = ttk.Button(control_frame, text="Next", command=safe_run(self.next_file))
+        btn_next.grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+        CreateToolTip(btn_next, "Move to the next audio chunk.")
 
     def display_current_file(self):
         for widget in self.plot_frame.winfo_children():
@@ -214,57 +397,109 @@ class AudioFilterGUI(tk.Toplevel):
             self.current_index += 1
             self.display_current_file()
 
-# --- Main GUI Code ---
+# --- Main GUI Code with Enhanced UI, Reordered Tabs, and Log Panel ---
 def main():
+    global log_text  # To be used in the log_message function
     root = tk.Tk()
     root.title("Sound Classifier System - End-to-End Workflow")
-    root.geometry("1000x700")
+    root.geometry("1000x750")
+    
+    # Set window icon (favicon placeholder) and add logo in header
+    try:
+        logo_image = tk.PhotoImage(file="skhysignal.png")
+        root.iconphoto(False, logo_image)
+    except Exception as e:
+        print("Logo file not found, using default icon.")
+    
+    style = ttk.Style()
+    style.theme_use('clam')
+    style.configure("TButton", font=("Helvetica", 12), padding=5)
+    style.configure("TLabel", font=("Helvetica", 12))
+    
+    header_frame = ttk.Frame(root)
+    header_frame.pack(side=tk.TOP, fill="x", padx=10, pady=10)
+    try:
+        logo = tk.PhotoImage(file="skhysignal.png")
+        logo_label = ttk.Label(header_frame, image=logo)
+        logo_label.image = logo
+        logo_label.pack(side=tk.LEFT, padx=10)
+    except Exception as e:
+        pass
+    title_label = ttk.Label(header_frame, text="Sound Classifier System", font=("Helvetica", 18, "bold"))
+    title_label.pack(side=tk.LEFT, padx=10)
+    
     notebook = ttk.Notebook(root)
-    notebook.pack(expand=True, fill="both")
+    notebook.pack(expand=True, fill="both", padx=10, pady=10)
     
-    # Acquisitions Tab
+    def add_tab(tab, title, label_text, buttons):
+        """Helper to add a tab with a header label and a grid of buttons.
+           'buttons' is a list of tuples: (button_text, callback, tooltip)."""
+        header = ttk.Label(tab, text=label_text, font=("Helvetica", 14))
+        header.grid(row=0, column=0, columnspan=2, pady=(10, 20))
+        for i, (btn_text, callback, tooltip) in enumerate(buttons, start=1):
+            btn = ttk.Button(tab, text=btn_text, command=safe_run(callback))
+            btn.grid(row=i, column=0, sticky="ew", padx=10, pady=5)
+            CreateToolTip(btn, tooltip)
+        tab.grid_columnconfigure(0, weight=1)
+    
+    # Tab 1: Acquisitions
     tab_acq = ttk.Frame(notebook)
-    notebook.add(tab_acq, text="Acquisitions")
-    ttk.Label(tab_acq, text="Acquisition Methods:", font=("Helvetica", 14)).pack(pady=10)
-    ttk.Button(tab_acq, text="Download Dataset", command=download_dataset).pack(pady=5)
-    ttk.Button(tab_acq, text="Download YouTube Playlist", command=download_youtube_playlist).pack(pady=5)
-    ttk.Button(tab_acq, text="Download YouTube Video", command=download_youtube_video).pack(pady=5)
+    notebook.add(tab_acq, text="1. Acquisitions")
+    add_tab(tab_acq, "Acquisition Methods:", "Acquisition Methods:",
+            [("Download Dataset", download_dataset, "Download a specified audio dataset to a chosen directory."),
+             ("Download YouTube Playlist", download_youtube_playlist, "Enter a YouTube playlist URL and save its video URLs."),
+             ("Download YouTube Video", download_youtube_video, "Download the audio from a YouTube video.")])
     
-    # Processing Tab
+    # Tab 2: Processing
     tab_proc = ttk.Frame(notebook)
-    notebook.add(tab_proc, text="Processing")
-    ttk.Label(tab_proc, text="Processing Options:", font=("Helvetica", 14)).pack(pady=10)
-    ttk.Button(tab_proc, text="Feature Extraction", command=process_feature_extraction_file).pack(pady=5)
-    ttk.Button(tab_proc, text="Augmentation", command=process_augmentation).pack(pady=5)
-    ttk.Button(tab_proc, text="Segmentation", command=process_segmentation).pack(pady=5)
-    ttk.Button(tab_proc, text="Sliding Window", command=process_sliding_window_file).pack(pady=5)
-    ttk.Button(tab_proc, text="Source Separation", command=process_source_separation_file).pack(pady=5)
+    notebook.add(tab_proc, text="2. Processing")
+    add_tab(tab_proc, "Processing Options:", "Processing Options:",
+            [("Feature Extraction", process_feature_extraction_file, "Extract audio features from a selected file."),
+             ("Augmentation", process_augmentation, "Apply pitch, volume, and reversal adjustments."),
+             ("Segmentation", process_segmentation, "Segment audio into smaller chunks."),
+             ("Sliding Window", process_sliding_window_file, "Apply sliding window processing on audio."),
+             ("Source Separation", process_source_separation_file, "Separate mixed audio sources.")])
     
-    # Validation Tab
-    tab_valid = ttk.Frame(notebook)
-    notebook.add(tab_valid, text="Validation")
-    ttk.Label(tab_valid, text="Validation Options:", font=("Helvetica", 14)).pack(pady=10)
-    ttk.Button(tab_valid, text="Validate Audio Samples", command=validate_samples).pack(pady=5)
-    
-    # Reports Tab
-    tab_reports = ttk.Frame(notebook)
-    notebook.add(tab_reports, text="Reports")
-    ttk.Label(tab_reports, text="Report Generation:", font=("Helvetica", 14)).pack(pady=10)
-    ttk.Button(tab_reports, text="Generate Sampled Report", command=generate_sampled_report).pack(pady=5)
-    ttk.Button(tab_reports, text="Generate Dataset Report", command=generate_dataset_report).pack(pady=5)
-    
-    # Data Preparation Tab
-    tab_data = ttk.Frame(notebook)
-    notebook.add(tab_data, text="Data Preparation")
-    ttk.Label(tab_data, text="Organize & Rename Data:", font=("Helvetica", 14)).pack(pady=10)
-    ttk.Button(tab_data, text="Create Classes from Metadata", command=create_classes_from_metadata).pack(pady=5)
-    ttk.Button(tab_data, text="Organize Dataset", command=organize_dataset).pack(pady=5)
-    ttk.Button(tab_data, text="Rename Classes", command=rename_classes).pack(pady=5)
-    
-    # Manual Filtering Tab
+    # Tab 3: Manual Filtering
     tab_filter = ttk.Frame(notebook)
-    notebook.add(tab_filter, text="Manual Filtering")
-    ttk.Button(tab_filter, text="Launch Filtering GUI", command=lambda: AudioFilterGUI(root)).pack(pady=10)
+    notebook.add(tab_filter, text="3. Manual Filtering")
+    add_tab(tab_filter, "Manual Filtering:", "Manual Filtering:",
+            [("Launch Filtering GUI", lambda: AudioFilterGUI(root), "Open the manual filtering interface.")])
+    
+    # Tab 4: Validation
+    tab_valid = ttk.Frame(notebook)
+    notebook.add(tab_valid, text="4. Validation")
+    add_tab(tab_valid, "Validation Options:", "Validation Options:",
+            [("Validate Audio Samples", validate_samples, "Validate and clean audio samples.")])
+    
+    # Tab 5: Reports
+    tab_reports = ttk.Frame(notebook)
+    notebook.add(tab_reports, text="5. Reports")
+    add_tab(tab_reports, "Report Generation:", "Report Generation:",
+            [("Generate Sampled Report", generate_sampled_report, "Generate a report from a subset of audio data."),
+             ("Generate Dataset Report", generate_dataset_report, "Generate a comprehensive report for the dataset.")])
+    
+    # Tab 6: Data Preparation
+    tab_data = ttk.Frame(notebook)
+    notebook.add(tab_data, text="6. Data Preparation")
+    add_tab(tab_data, "Organize & Rename Data:", "Organize & Rename Data:",
+            [("Create Classes from Metadata", create_classes_from_metadata, "Organize files into classes using metadata."),
+             ("Organize Dataset", organize_dataset, "Arrange audio samples into training, validation, and test sets."),
+             ("Rename Classes", rename_classes, "Rename class directories or files based on a file extension.")])
+    
+    # Tab 7: Model & API
+    tab_model_api = ttk.Frame(notebook)
+    notebook.add(tab_model_api, text="7. Model & API")
+    add_tab(tab_model_api, "Model Building & API Connection:", "Model Building & API Connection:",
+            [("Build Model", build_model, "Train an ensemble classifier from feature files and save the model."),
+             ("Connect to API", connect_to_api, "Open API documentation to test FastAPI endpoints.")])
+    
+    # Log Panel at the bottom
+    log_frame = ttk.Frame(root)
+    log_frame.pack(side=tk.BOTTOM, fill="x", padx=10, pady=(0,10))
+    ttk.Label(log_frame, text="Log:", font=("Helvetica", 12, "bold")).pack(anchor="w", padx=5)
+    log_text = tk.Text(log_frame, height=6, state="disabled", bg="#f0f0f0")
+    log_text.pack(fill="both", expand=True, padx=5, pady=5)
     
     root.mainloop()
 

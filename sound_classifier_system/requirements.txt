@@ -15,4 +15,7 @@ noisereduce
 pandas
 scikit-learn
 soundfile
-tkinter
+matplotlib
+python-multipart
+websockets
+psutil

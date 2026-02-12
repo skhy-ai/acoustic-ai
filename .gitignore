@@ -127,3 +127,9 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Audio files
+*.wav
+
+# Windows Zone Identifier files
+*:Zone.Identifier
